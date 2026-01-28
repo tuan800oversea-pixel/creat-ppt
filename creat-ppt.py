@@ -9,7 +9,7 @@ import time
 
 # ================= 页面配置 =================
 st.set_page_config(layout="wide")
-st.title("图片生成 PPT 工具")
+st.title("多图片自动生成 PPT")
 
 # ================= 初始化 =================
 if "images" not in st.session_state:
@@ -228,3 +228,4 @@ if st.button("生成 PPT"):
             file_name="images.pptx",
             mime="application/vnd.openxmlformats-officedocument.presentationml.presentation"
         )
+
