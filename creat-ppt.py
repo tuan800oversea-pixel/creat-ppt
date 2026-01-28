@@ -33,10 +33,14 @@ uploaded_files = st.file_uploader(
     accept_multiple_files=True
 )
 
+# 检查文件大小是否超出限制
+max_size_mb = 1024  # 1GB = 1024MB
 if uploaded_files:
-    progress = st.progress(0.0)
-    info = st.empty()
-    total = len(uploaded_files)
+    for file in uploaded_files:
+        if len(file.getvalue()) > max_size_mb * 1024 * 1024:
+            st.error(f"文件 {file.name} 超过最大上传大小 1GB，请重新选择小于 1GB 的文件")
+        else:
+            st.success(f"文件 {file.name} 上传成功")
 
     for idx, file in enumerate(uploaded_files):
         file_bytes = file.read()
@@ -228,4 +232,5 @@ if st.button("生成 PPT"):
             file_name="images.pptx",
             mime="application/vnd.openxmlformats-officedocument.presentationml.presentation"
         )
+
 
