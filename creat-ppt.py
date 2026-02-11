@@ -6,228 +6,231 @@ import hashlib
 import tempfile
 import os
 import time
+import imagehash
 
 # ================= 页面配置 =================
-st.set_page_config(layout="wide")
+st.set_page_config(layout="wide", page_title="多图片自动生成 PPT")
 st.title("多图片自动生成 PPT")
 
-# ================= 初始化 =================
-if "images" not in st.session_state:
+# ================= 初始化 Session State =================
+def init_session():
     st.session_state.images = []
-
-if "processed_ids" not in st.session_state:
     st.session_state.processed_ids = set()
-
-if "page" not in st.session_state:
     st.session_state.page = 1
-
-if "ppt_bytes" not in st.session_state:
     st.session_state.ppt_bytes = None
+    st.session_state.temp_duplicates = []
+    # 通过 key 的变动来强制清空 file_uploader
+    if "uploader_key" not in st.session_state:
+        st.session_state.uploader_key = str(uuid.uuid4())
+
+if "images" not in st.session_state:
+    init_session()
 
 TMP_DIR = tempfile.gettempdir()
 
-# ================= 上传图片 =================
-uploaded_files = st.file_uploader(
-    "上传图片（支持批量，建议 ≤500 张，上传图片时点击一张，然后在键盘上同时按住crtl+a，即可全选图片）",
-    type=["png", "jpg", "jpeg"],
-    accept_multiple_files=True
-)
-
-if uploaded_files:
-    progress = st.progress(0.0)
-    info = st.empty()
-    total = len(uploaded_files)
-
-    for idx, file in enumerate(uploaded_files):
-        file_bytes = file.read()
-        file_hash = hashlib.md5(file_bytes).hexdigest()
-        file_id = f"{file.name}_{file_hash}"
-
-        if file_id in st.session_state.processed_ids:
-            continue
-
+# ================= 核心功能：清空功能 =================
+def clear_all_data():
+    # 物理删除临时缩略图
+    for img in st.session_state.images:
         try:
-            img = Image.open(BytesIO(file_bytes)).convert("RGB")
-            w, h = img.size
-            ratio = w / h
+            if os.path.exists(img["thumb_path"]):
+                os.remove(img["thumb_path"])
+        except:
+            pass
+    
+    # 重置状态
+    st.session_state.images = []
+    st.session_state.processed_ids = set()
+    st.session_state.page = 1
+    st.session_state.ppt_bytes = None
+    st.session_state.temp_duplicates = []
+    # 核心：改变 key，彻底清空上传组件的文件列表
+    st.session_state.uploader_key = str(uuid.uuid4())
+    st.rerun()
 
-            thumb = img.copy()
-            thumb.thumbnail((260, 260))  # 创建缩略图
-            uid = str(uuid.uuid4())
-            thumb_path = os.path.join(TMP_DIR, f"{uid}.png")
-            thumb.save(thumb_path, "PNG")
+# ================= 核心功能：重复检测弹窗 =================
+@st.dialog("发现疑似重复、缩放或变色图片")
+def show_duplicate_dialog():
+    st.info("系统检测到以下图片内容高度相似。您可以自由决定删除哪一张（或都保留）：")
+    
+    # 记录用户想要删除的 UID
+    uids_to_remove = set()
+    
+    for idx, dup in enumerate(st.session_state.temp_duplicates):
+        orig = dup['original']
+        curr = dup['current']
+        
+        col1, col2, col3 = st.columns([4, 1, 4])
+        
+        with col1:
+            st.image(orig['thumb_path'], caption=f"已有图片: {orig['name']}", width=180)
+            if st.checkbox(f"删除这张已有项", key=f"del_orig_{idx}_{orig['uid']}"):
+                uids_to_remove.add(orig['uid'])
+        
+        with col2:
+            st.markdown("<br><br><h3 style='text-align: center;'>VS</h3>", unsafe_allow_html=True)
+        
+        with col3:
+            st.image(curr['thumb_path'], caption=f"新上传项: {curr['name']}", width=180)
+            if st.checkbox(f"删除这张新上传", key=f"del_curr_{idx}_{curr['uid']}"):
+                uids_to_remove.add(curr['uid'])
+        
+        st.divider()
 
-            st.session_state.images.append({
-                "uid": uid,
-                "name": file.name,
-                "bytes": file_bytes,
-                "thumb_path": thumb_path,
-                "ratio": ratio
-            })
+    if st.button("确认处理并关闭弹窗", type="primary", use_container_width=True):
+        if uids_to_remove:
+            st.session_state.images = [
+                img for img in st.session_state.images 
+                if img['uid'] not in uids_to_remove
+            ]
+        # 处理完后清空临时队列
+        st.session_state.temp_duplicates = []
+        st.success(f"已处理！成功删除 {len(uids_to_remove)} 张图片")
+        time.sleep(0.5)
+        st.rerun()
 
-            st.session_state.processed_ids.add(file_id)
+# ================= 顶部操作栏 =================
+col_upload, col_clear = st.columns([8, 2])
 
-        except Exception as e:
-            st.error(f"{file.name} 读取失败：{e}")
+with col_upload:
+    # 使用动态 key 保证可以被 clear_all_data 彻底重置
+    uploaded_files = st.file_uploader(
+        "上传图片（支持批量，Ctrl+A 全选）",
+        type=["png", "jpg", "jpeg"],
+        accept_multiple_files=True,
+        key=st.session_state.uploader_key
+    )
 
-        progress.progress((idx + 1) / total)
+with col_clear:
+    st.write("---") 
+    if st.button("🗑️ 清空所有图片", use_container_width=True, type="secondary"):
+        clear_all_data()
 
-    progress.empty()
-    info.empty()
+# ================= 上传处理逻辑 =================
+if uploaded_files:
+    # 只有当临时队列为空时才进行新一轮扫描，避免重复触发
+    if not st.session_state.temp_duplicates:
+        new_found_duplicates = []
+        # 阈值建议 15，兼顾颜色和缩放
+        SIMILARITY_THRESHOLD = 15 
 
-# ================= 分页参数 =================
+        for file in uploaded_files:
+            file_bytes = file.read()
+            file_hash = hashlib.md5(file_bytes).hexdigest()
+            file_id = f"{file.name}_{file_hash}"
+
+            if file_id in st.session_state.processed_ids:
+                continue
+
+            try:
+                img = Image.open(BytesIO(file_bytes)).convert("RGB")
+                curr_phash = imagehash.phash(img)
+                
+                uid = str(uuid.uuid4())
+                thumb = img.copy()
+                thumb.thumbnail((260, 260))
+                thumb_path = os.path.join(TMP_DIR, f"{uid}.png")
+                thumb.save(thumb_path, "PNG")
+
+                new_img_obj = {
+                    "uid": uid,
+                    "name": file.name,
+                    "bytes": file_bytes,
+                    "thumb_path": thumb_path,
+                    "ratio": img.size[0] / img.size[1],
+                    "phash": curr_phash
+                }
+
+                # 查找重复
+                for existing in st.session_state.images:
+                    if (curr_phash - existing['phash']) <= SIMILARITY_THRESHOLD:
+                        new_found_duplicates.append({"original": existing, "current": new_img_obj})
+                        break # 一张图只找一个对应重复项展示
+                
+                st.session_state.images.append(new_img_obj)
+                st.session_state.processed_ids.add(file_id)
+
+            except Exception as e:
+                st.error(f"{file.name} 读取失败：{e}")
+
+        if new_found_duplicates:
+            st.session_state.temp_duplicates = new_found_duplicates
+            show_duplicate_dialog()
+
+# ================= 展示与分页 =================
 IMAGES_PER_PAGE = 40
 IMAGES_PER_ROW = 10
-THUMB_HEIGHT_MM = 40  # 固定图片高度为40mm
-MM_TO_PIXELS = 3.77953  # 1 mm = 3.77953 pixels, this conversion is used for streamlit image sizing
+THUMB_HEIGHT_MM = 40
+MM_TO_PIXELS = 3.77953
 
 total_images = len(st.session_state.images)
 total_pages = max(1, (total_images + IMAGES_PER_PAGE - 1) // IMAGES_PER_PAGE)
 st.session_state.page = min(st.session_state.page, total_pages)
 
-start = (st.session_state.page - 1) * IMAGES_PER_PAGE
-end = start + IMAGES_PER_PAGE
-page_images = st.session_state.images[start:end]
+start_idx = (st.session_state.page - 1) * IMAGES_PER_PAGE
+page_images = st.session_state.images[start_idx : start_idx + IMAGES_PER_PAGE]
 
-# ================= 控制函数 =================
-def prev_page():
-    if st.session_state.page > 1:
-        st.session_state.page -= 1
-        st.rerun()  # 使用 st.rerun() 来重新加载页面
+st.subheader(f"图片预览 (共 {total_images} 张)")
 
-def next_page():
-    if st.session_state.page < total_pages:
-        st.session_state.page += 1
-        st.rerun()  # 使用 st.rerun() 来重新加载页面
-
-# ================= 控制区 =================
-st.subheader("图片预览")
-
-# 显示总图片数
-st.write(f"共 {total_images} 张图片")
-
-# ================= 图片展示 =================
+# 网格展示
 for i in range(0, len(page_images), IMAGES_PER_ROW):
     cols = st.columns(IMAGES_PER_ROW)
     for col, img in zip(cols, page_images[i:i + IMAGES_PER_ROW]):
         with col:
-            # 使用PIL调整图片的高度，宽度按比例缩放
-            pil_img = Image.open(img["thumb_path"])
+            h_px = int(THUMB_HEIGHT_MM * MM_TO_PIXELS)
+            w_px = int(h_px * img["ratio"])
+            st.image(img["thumb_path"], width=w_px)
 
-            # 固定高度为40mm，宽度按比例计算
-            # 40mm = 40 * 3.77953 pixels
-            fixed_height_pixels = int(THUMB_HEIGHT_MM * MM_TO_PIXELS)
-
-            # 计算宽度
-            width = int(fixed_height_pixels * img["ratio"])
-
-            # 如果图片的高度小于40mm，则放大至40mm
-            pil_img = pil_img.resize((width, fixed_height_pixels))  # 调整图片大小
-
-            # 将调整后的图片传递给 st.image
-            img_bytes = BytesIO()
-            pil_img.save(img_bytes, format="PNG")
-            img_bytes.seek(0)
-
-            # 使用 st.image 展示调整后的图片
-            st.image(img_bytes, width=width)  # 使用宽度控制图片的大小
-
-# ================= 分页 =================
-cp, cn, ct = st.columns([1, 1, 6])
-
-with cp:
-    if st.session_state.page > 1:
-        st.button("上一页", on_click=prev_page)
-
-with cn:
-    if st.session_state.page < total_pages:
-        st.button("下一页", on_click=next_page)
+# 分页导航
+if total_pages > 1:
+    cp, cn, _ = st.columns([1, 1, 6])
+    with cp:
+        if st.button("上一页", disabled=(st.session_state.page <= 1)):
+            st.session_state.page -= 1
+            st.rerun()
+    with cn:
+        if st.button("下一页", disabled=(st.session_state.page >= total_pages)):
+            st.session_state.page += 1
+            st.rerun()
 
 # ================= PPT 生成 =================
-def generate_ppt(images, callback=None):
+def generate_ppt(images):
     from pptx import Presentation
     from pptx.util import Inches, Mm
     prs = Presentation()
-    prs.slide_width = Inches(13.33)
-    prs.slide_height = Inches(7.5)
-
-    left_margin = Mm(0)       # ⚡ 左对齐
-    top_margin = Mm(10)    # 每页ppt顶部间隔10mm
-    spacing = Mm(2.5)           # 图片之间的水平间距（以及换行后的垂直间距）
-    fixed_height = Mm(40)     # 图片固定高度
-    max_y = prs.slide_height - top_margin
-
+    prs.slide_width, prs.slide_height = Inches(13.33), Inches(7.5)
+    left_m, top_m, space, fix_h = Mm(0), Mm(10), Mm(2.5), Mm(40)
+    
     slide = prs.slides.add_slide(prs.slide_layouts[6])
-    x = left_margin
-    y = top_margin
-
-    total = len(images)
-    start_time = time.time()
-
-    for idx, img in enumerate(images):
-        width = fixed_height * img["ratio"]
-
-        # 换行
-        if x + width > prs.slide_width:
-            x = left_margin
-            y += fixed_height + spacing
-
-        # 超出页面高度 → 新建一页
-        if y + fixed_height > max_y:
+    x, y = left_m, top_m
+    
+    for img in images:
+        w = fix_h * img["ratio"]
+        if x + w > prs.slide_width:
+            x, y = left_m, y + fix_h + space
+        if y + fix_h > prs.slide_height - top_m:
             slide = prs.slides.add_slide(prs.slide_layouts[6])
-            x = left_margin
-            y = top_margin
+            x, y = left_m, top_m
+        
+        slide.shapes.add_picture(BytesIO(img["bytes"]), x, y, height=fix_h)
+        x += w + space
+    
+    out = BytesIO()
+    prs.save(out)
+    out.seek(0)
+    return out
 
-        slide.shapes.add_picture(
-            BytesIO(img["bytes"]),
-            x, y,
-            height=fixed_height
-        )
-
-        x += width + spacing
-
-        if callback and idx % 5 == 0:
-            elapsed = time.time() - start_time
-            avg = elapsed / (idx + 1)
-            callback(idx / total * 0.95, avg * (total - idx - 1))
-
-    output = BytesIO()
-    prs.save(output)
-    output.seek(0)
-
-    if callback:
-        callback(1.0, 0)
-
-    return output
-
-# ================= 生成 & 下载 =================
 st.divider()
+if st.button("🚀 生成 PPT", type="primary", use_container_width=True):
+    if st.session_state.images:
+        with st.spinner("正在排版生成中..."):
+            st.session_state.ppt_bytes = generate_ppt(st.session_state.images)
+        st.success("PPT 生成成功！")
 
-if st.button("生成 PPT"):
-    # 直接选择所有图片
-    selected = st.session_state.images
-
-    if not selected:
-        st.warning("请至少选择一张图片")
-    else:
-        bar = st.progress(0.0)
-        text = st.empty()
-
-        def cb(p, t):
-            bar.progress(p)
-            text.text(f"预计剩余时间：{t:.1f}s")
-
-        st.session_state.ppt_bytes = generate_ppt(selected, cb)
-
-        bar.empty()
-        text.empty()
-
-        st.download_button(
-            "下载 PPT",
-            data=st.session_state.ppt_bytes,
-            file_name="images.pptx",
-            mime="application/vnd.openxmlformats-officedocument.presentationml.presentation"
-        )
-
-
-
+if st.session_state.ppt_bytes:
+    st.download_button(
+        "📂 下载 PPT 文件", 
+        data=st.session_state.ppt_bytes, 
+        file_name=f"ppt_export_{int(time.time())}.pptx", 
+        use_container_width=True
+    )
